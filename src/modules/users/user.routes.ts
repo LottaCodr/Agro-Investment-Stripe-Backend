@@ -47,11 +47,27 @@ router.get(
   })
 );
 
-// Update user (admin can change role, stripeAccountId, isVerified)
+// Update user (admin can change role, flutterwave bank details, legacy stripe, isVerified)
 router.patch(
   "/:id",
   catchAsync(async (req, res, next) => {
-    const allowed = ["name", "email", "role", "country", "photo", "isVerified", "stripeAccountId", "stripeCustomerId"];
+    const allowed = [
+      "name",
+      "email",
+      "role",
+      "country",
+      "photo",
+      "phone",
+      "isVerified",
+      // Flutterwave primary
+      "flutterwaveAccountNumber",
+      "flutterwaveBankCode",
+      "flutterwaveAccountName",
+      "flutterwaveCustomerId",
+      // Legacy Stripe
+      "stripeAccountId",
+      "stripeCustomerId",
+    ];
     const updates: any = {};
     for (const k of allowed) if (req.body[k] !== undefined) updates[k] = req.body[k];
 

@@ -10,8 +10,15 @@ export interface IUser extends Document {
   country?: string;
   photo?: string;
   isVerified: boolean;
+  // Legacy Stripe (deprecated)
   stripeAccountId?: string;
   stripeCustomerId?: string;
+  // Flutterwave — primary for NG
+  flutterwaveAccountNumber?: string;
+  flutterwaveBankCode?: string;
+  flutterwaveAccountName?: string;
+  flutterwaveCustomerId?: string;
+  phone?: string;
   passwordResetToken?: string;
   passwordResetExpires?: Date;
   createdAt: Date;
@@ -41,7 +48,7 @@ const UserSchema = new Schema<IUser>(
       type: String,
       required: [true, "Password is required"],
       minlength: [8, "Password must be at least 8 characters"],
-      select: false, // never return by default
+      select: false,
     },
     role: {
       type: String,
@@ -54,16 +61,22 @@ const UserSchema = new Schema<IUser>(
     },
     country: { type: String, trim: true, maxlength: 100 },
     photo: { type: String, trim: true },
+    phone: { type: String, trim: true },
     isVerified: { type: Boolean, default: false },
+    // Legacy
     stripeAccountId: { type: String, sparse: true, trim: true },
     stripeCustomerId: { type: String, sparse: true, trim: true },
+    // Flutterwave
+    flutterwaveAccountNumber: { type: String, sparse: true, trim: true },
+    flutterwaveBankCode: { type: String, sparse: true, trim: true },
+    flutterwaveAccountName: { type: String, sparse: true, trim: true },
+    flutterwaveCustomerId: { type: String, sparse: true, trim: true },
     passwordResetToken: { type: String, select: false },
     passwordResetExpires: { type: Date, select: false },
   },
   { timestamps: true, toJSON: { virtuals: true }, toObject: { virtuals: true } }
 );
 
-// Indexes
 UserSchema.index({ email: 1 }, { unique: true });
 UserSchema.index({ role: 1 });
 
@@ -74,12 +87,10 @@ UserSchema.pre("save", async function () {
   this.password = await bcrypt.hash(this.password, salt);
 });
 
-// Compare passwords
 UserSchema.methods.comparePassword = async function (candidate: string): Promise<boolean> {
   return bcrypt.compare(candidate, this.password);
 };
 
-// Hide sensitive fields when converting to JSON
 UserSchema.methods.toJSON = function () {
   const obj = this.toObject();
   delete obj.password;

@@ -1,11 +1,13 @@
-# AYF Agro Investment — Stripe Backend
+# AYF Agro Investment — Flutterwave Backend
 
-> Stripe-powered farm investment platform: investors fund farms, payments via Stripe PaymentIntents, ROI payouts via Stripe Transfers, all hardened for production.
+> Flutterwave-powered farm investment platform (Nigeria-first): investors fund farms, payments via Flutterwave Checkout, ROI payouts via Flutterwave Transfers, all hardened for production.
 
 [![Node](https://img.shields.io/badge/node-%3E%3D18-brightgreen)]()
 [![TypeScript](https://img.shields.io/badge/typescript-5.9-blue)]()
-[![Stripe](https://img.shields.io/badge/stripe-20.x-6772e5)]()
+[![Flutterwave](https://img.shields.io/badge/flutterwave-v3-F5A623)]()
 [![License](https://img.shields.io/badge/license-ISC-lightgrey)]()
+
+> **Migration note:** This repo was originally Stripe-based. All Stripe code is now deprecated/removed. Use Flutterwave env vars (`FLW_*`). Legacy `stripe` files are kept as shims.
 
 ---
 
@@ -16,7 +18,7 @@
 - [Environment](#environment)
 - [Seeding](#seeding)
 - [API Overview](#api-overview)
-- [Stripe Flow](#stripe-flow)
+- [Flutterwave Flow](#flutterwave-flow)
 - [ROI Worker](#roi-worker)
 - [Security Notes](#security-notes)
 - [Scripts](#scripts)
@@ -33,20 +35,21 @@ Client (web/mobile)
    │
    ├─ POST /api/auth/signup|login → JWT (15m) + refresh (7d, httpOnly cookie)
    ├─ POST /api/farms (admin) → Farm { goal, min, roi, duration, fundedAmount }
-   ├─ POST /api/investments { farmId, amount } → creates Investment(pending) + Stripe PI → returns clientSecret
-   ├─ Stripe.js confirms PI on client → Stripe → POST /api/webhooks/stripe (raw body) → marks completed + $inc fundedAmount + email
-   └─ ROI worker (daily midnight, maturity-gated) → Stripe Transfers → marks roiPaid
-
+   ├─ POST /api/investments { farmId, amount, currency? } → creates Investment(pending, tx_ref: AYF-<id>-<ts>, paymentProvider:flutterwave) + Flutterwave /v3/payments → returns { paymentLink, tx_ref }
+   ├─ Client redirects to paymentLink (Flutterwave Checkout: card, bank transfer, USSD, mobile money) → Pays → Flutterwave → POST /api/webhooks/flutterwave (verif-hash + verify /v3/transactions/{id}/verify) → marks completed + $inc fundedAmount + email
+   ├─ (Optional) GET /api/investments/:id/verify?transaction_id=xxx&tx_ref=yyy → server verifies with Flutterwave and marks completed (for redirect polling fallback)
+   └─ ROI worker (daily midnight, maturity-gated) → Flutterwave /v3/transfers (account_bank + account_number) → marks roiPaid
 MongoDB (Mongoose) owns: User, Farm, Investment, WebhookEvent
 ```
 
 **Key design decisions**
 
-- Webhook raw body must be *before* `express.json()` (Stripe signature needs exact bytes).
-- Idempotency: `WebhookEvent.stripeEventId` unique index + catch `11000`; PaymentIntent creation uses `idempotencyKey: pi-${investmentId}`; Transfers use `roi-transfer-${investmentId}`.
+- Flutterwave webhook uses `verif-hash` header (your secret hash from Dashboard → Settings → Webhooks) + **server-side verification** via `GET /v3/transactions/{id}/verify` before marking `completed`. Never trust redirect params alone.
+- Idempotency: `WebhookEvent.stripeEventId` unique index + catch `11000` (despite name, stores `dedupId` = `transactionId || tx_ref-event-flwRef`); Transfers use `reference: roi-${investmentId}-${Date.now()}`.
 - `fundedAmount` updated atomically with `$inc`, not read-modify-save.
 - `maturityDate = createdAt + durationMonths` computed in Investment `pre("validate")`.
-- Stripe singleton `getStripe()` so API version & config are centralized.
+- `tx_ref` format `AYF-<investmentId>-<timestamp>` encodes `investmentId` for webhook lookup even if meta lost.
+- Flutterwave helpers in `src/config/flutterwave.ts` (fetch-based, uses `FLW_BASE_URL`, `FLW_SECRET_KEY`).
 
 ---
 
@@ -56,11 +59,11 @@ MongoDB (Mongoose) owns: User, Farm, Investment, WebhookEvent
 # 1. Clone
 git clone <repo>
 cd Agro-Investment-Stripe-Backend
-git checkout arena/01a01939-agro-investment-stripe-backend # this session
+git checkout arena/01a01939-agro-investment-stripe-backend
 
 # 2. Env
 cp .env.example .env
-# edit .env: set MONGO_URI, JWT_SECRET (32+ chars), STRIPE_SECRET_KEY, etc.
+# edit .env: set MONGO_URI, JWT_SECRET (32+ chars), FLW_SECRET_KEY, FLW_WEBHOOK_SECRET_HASH, etc.
 
 # 3. Install
 npm install
@@ -79,30 +82,37 @@ npm start        # node dist/server.js (production)
 
 # 7. Health
 curl http://localhost:5000/health
-# { success:true, db:"connected", stripe:"configured", ... }
+# { success:true, db:"connected", flutterwave:"configured", ... }
 ```
 
-**Requirements:** Node ≥18, MongoDB ≥6 (or Atlas URI), Stripe test keys.
+**Requirements:** Node ≥18, MongoDB ≥6 (or Atlas URI), Flutterwave test keys from dashboard.
 
 ---
 
 ## Environment
 
-See `.env.example` for full annotated list. Required:
+See `.env.example` for full annotated list. Required for Flutterwave:
 
 | Key | Description |
 |-----|-------------|
 | `PORT` | HTTP port (default 5000) |
 | `MONGO_URI` | Mongo connection string |
-| `JWT_SECRET` | HS256 secret ≥32 chars (change default!) |
-| `STRIPE_SECRET_KEY` | `sk_test_...` or `sk_live_...` |
-| `STRIPE_WEBHOOK_SECRET` | `whsec_...` from `stripe listen` |
+| `JWT_SECRET` | HS256 secret ≥32 chars |
+| `FLW_PUBLIC_KEY` | `FLWPUBK_TEST-...` (for inline) |
+| `FLW_SECRET_KEY` | `FLWSECK_TEST-...` or `FLUTTERWAVE_SECRET_KEY` |
+| `FLW_ENCRYPTION_KEY` | `FLWSECK_TEST...` (if using card encryption) |
+| `FLW_WEBHOOK_SECRET_HASH` | Secret hash you set in Dashboard → Settings → Webhooks (`verif-hash`) |
+| `FLW_BASE_URL` | `https://api.flutterwave.com/v3` (default) |
+| `FLW_REDIRECT_URL` | After payment redirect (default `${CLIENT_URL}/payment/callback`) |
+| `FLW_CURRENCY` | Default payout/payin currency (default `NGN`) |
 | `CLIENT_URL` | Frontend origin for CORS |
 | `EMAIL_HOST/PORT/USER/PASS/FROM` | Nodemailer SMTP (mocked if missing) |
 | `CLOUDINARY_*` | Optional image uploads |
 | `ADMIN_EMAIL/PASSWORD/NAME` | Seed admin |
 | `RATE_LIMIT_WINDOW_MS/MAX` | Global rate limit (default 15m/100) |
 | `ENABLE_ROI_WORKER` | `true` to run cron (default true) |
+
+Legacy `STRIPE_*` kept as stubs (deprecated).
 
 ---
 
@@ -114,10 +124,13 @@ npm run seed:admin
 ADMIN_EMAIL=myadmin@corp.com ADMIN_PASSWORD='S3cure!123' npm run seed:admin
 ```
 
-Also set admin from mongo shell:
+Also:
 ```js
 db.users.updateOne({email:"user@x.com"}, {$set:{role:"admin"}})
+db.users.updateOne({email:"investor@x.com"}, {$set:{flutterwaveAccountNumber:"0123456789", flutterwaveBankCode:"044", flutterwaveAccountName:"John Doe"}})
 ```
+
+**Bank codes:** List via `GET https://api.flutterwave.com/v3/banks/NG` or dashboard. Common `044=Access Bank`, `058=GTBank`, `011=First Bank`, `232=Sterling`.
 
 ---
 
@@ -129,37 +142,41 @@ Base: `/api`
 
 | Method | Path | Auth | Role | Body |
 |--------|------|------|------|------|
-| POST | `/auth/signup` | — | — | `{name,email,password,country?,photo?}` → `{token,refreshToken,user}` |
+| POST | `/auth/signup` | — | — | `{name,email,password,country?,photo?,phone?}` → `{token,refreshToken,user}` |
 | POST | `/auth/login` | — | — | `{email,password}` |
 | POST | `/auth/refresh` | — | — | `{refreshToken}` or cookie → new tokens |
 | POST | `/auth/logout` | — | — | — (clears cookie) |
 | GET | `/auth/me` | Bearer | any | — → current user |
-| PATCH | `/auth/me` | Bearer | any | `{name?,country?,photo?}` |
+| PATCH | `/auth/me` | Bearer | any | `{name?,country?,photo?,phone?}` |
 
-> **Security note:** `role` sent in signup is *ignored* — all signups are `investor`. Admin must be seeded.
+> `role` in signup is ignored — all signups are `investor`.
 
 ### Farms
 
 | Method | Path | Auth | Role | Notes |
 |--------|------|------|------|-------|
-| POST | `/farms` | Bearer | admin | Zod validated `farmCreateSchema` |
-| PUT | `/farms/:id` | Bearer | admin | Whitelisted fields only |
+| POST | `/farms` | Bearer | admin | Zod validated |
+| PUT | `/farms/:id` | Bearer | admin | Whitelisted only |
 | DELETE | `/farms/:id` | Bearer | admin |  |
-| GET | `/farms?page=1&limit=10&search=maize&status=active&sort=-createdAt` | Bearer | investor,admin | Paginated, text search, filtering, sorting |
+| GET | `/farms?page=1&limit=10&search=maize&status=active&sort=-createdAt` | Bearer | investor,admin | Paginated |
 | GET | `/farms/:id` | Bearer | investor,admin |  |
-| GET | `/farms/stats/summary` | Bearer | admin | Aggregated goals/funded/avgROI |
+| GET | `/farms/stats/summary` | Bearer | admin | Aggregated |
 
-### Investments
+### Investments (Flutterwave)
 
 | Method | Path | Auth | Role | Notes |
 |--------|------|------|------|-------|
-| POST | `/investments` | Bearer | investor | `{farmId,amount,currency?}` → `{clientSecret,paymentIntentId,investmentId}` |
+| POST | `/investments` | Bearer | investor | `{farmId,amount,currency?}` → `{paymentLink, tx_ref, investmentId, redirectUrl}` |
 | GET | `/investments/me?page=&limit=&status=` | Bearer | investor,admin | My investments paginated |
 | GET | `/investments/my/:id` | Bearer | owner/admin | Single |
 | GET | `/investments/:id` | Bearer | owner/admin | Single |
-| GET | `/investments?page=&limit=&status=&farmId=` | Bearer | admin | All investments |
-| POST | `/investments/:id/complete` | Bearer | admin | Manual complete (idempotent) |
-| POST | `/investments/:id/cancel` | Bearer | owner,admin | Cancels pending, tries Stripe cancel |
+| GET | `/investments?page=&limit=&status=&farmId=` | Bearer | admin | All |
+| **GET** | `/investments/:id/verify?transaction_id=123&tx_ref=AYF-...` | Bearer | owner/admin | **Verify Flutterwave transaction and mark completed (fallback to webhook)** |
+| GET | `/investments/verify?tx_ref=...` | Bearer | owner/admin | Same |
+| POST | `/investments/:id/complete` | Bearer | admin | Manual complete (idempotent, for admin) |
+| POST | `/investments/:id/cancel` | Bearer | owner,admin | Cancels pending |
+
+**Response for invest:** includes `paymentLink` (Flutterwave Checkout URL). Frontend should `window.location = paymentLink` or use `FlutterwaveCheckout({public_key, tx_ref, amount, currency, customer, callback: verify})`.
 
 ### Users (Admin)
 
@@ -167,64 +184,84 @@ Base: `/api`
 |--------|------|------|------|
 | GET | `/users?search=&role=&page=&limit=` | Bearer | admin |
 | GET | `/users/:id` | Bearer | admin |
-| PATCH | `/users/:id` | Bearer | admin | Whitelist: `name,email,role,country,photo,isVerified,stripeAccountId,stripeCustomerId` |
+| PATCH | `/users/:id` | Bearer | admin | Whitelist: `name,email,role,country,photo,phone,isVerified,flutterwaveAccountNumber,flutterwaveBankCode,flutterwaveAccountName,flutterwaveCustomerId,stripeAccountId(legacy)` |
 | DELETE | `/users/:id` | Bearer | admin |
 
 ### System
 
 | Method | Path |  |
 |--------|------|--|
-| GET | `/` | `{status, env, version}` |
-| GET | `/health` | `{db, stripe, email, uptime}` |
-| POST | `/api/webhooks/stripe` | **Raw body**, Stripe-signed — do not send JSON. |
+| GET | `/` | `{status:"AYF Backend running (Flutterwave)", provider:"flutterwave"}` |
+| GET | `/health` | `{db, flutterwave, stripe(legacy), email, uptime}` |
+| POST | `/api/webhooks/flutterwave` | **Flutterwave webhook** — `verif-hash` header, JSON body. **Primary** |
+| POST | `/api/webhooks/stripe` | **Legacy Stripe raw webhook** — alias to Flutterwave handler (for migration) |
+| POST | `/api/webhooks/flutterwave/verify` | Alias |
+| POST | `/api/payments/webhook` | Alias |
 
-**Errors** are `{ success:false, message, code?, stack? (dev) }` with codes like `VALIDATION_ERROR`, `UNAUTHORIZED`, `FORBIDDEN`, `DUPLICATE_KEY`, `CAST_ERROR`.
-
-All list endpoints return `{ success:true, data, pagination:{page,limit,total,pages} }`.
+**Errors** are `{ success:false, message, code }` with codes like `VALIDATION_ERROR`, `UNAUTHORIZED`, `FORBIDDEN`, `DUPLICATE_KEY`, `CAST_ERROR`.
 
 ---
 
-## Stripe Flow
+## Flutterwave Flow
 
-1. **Invest** `POST /api/investments` creates `Investment{pending, maturityDate}` and `stripe.paymentIntents.create({amount*100, automatic_payment_methods, metadata:{investmentId}, idempotencyKey})` → returns `clientSecret`.
-2. **Client confirms** with Stripe.js `stripe.confirmPayment({clientSecret})`.
-3. **Webhook** `POST /api/webhooks/stripe` (use `stripe listen --forward-to localhost:5000/api/webhooks/stripe` for local dev):
+### Payment (payin)
+
+1. **Invest** `POST /api/investments` creates `Investment{pending, flutterwaveTxRef: AYF-<id>-<ts>, maturityDate}` and `POST https://api.flutterwave.com/v3/payments` with `tx_ref`, `amount`, `currency`, `redirect_url`, `customer`, `meta:{investmentId}`, `customizations`. Returns `link`. Stores `flutterwaveTxRef`, `flutterwavePaymentLink`.
+
+2. **Client redirects** to `link`. User pays via card/bank transfer/USSD/mobile money.
+
+3. **Webhook** `POST /api/webhooks/flutterwave`
+   - Verifies `verif-hash` header equals `FLW_WEBHOOK_SECRET_HASH` (if set).
+   - Extracts `data.id` (transactionId), `tx_ref`, `status`, `amount`, `currency`.
+   - **Verifies server-side** via `GET /v3/transactions/{id}/verify` with `Bearer FLW_SECRET_KEY`. Checks `status==="successful"`, `amount`, `currency`, `tx_ref`.
+   - Finds Investment by `flutterwaveTxRef` or encoded `investmentId` in `tx_ref`, marks `completed`, `$inc` farm `fundedAmount`, marks farm `funded` if goal met, sends email.
+
+   Local test:
    ```bash
-   stripe listen --forward-to localhost:5000/api/webhooks/stripe
-   stripe trigger payment_intent.succeeded
+   # Use Flutterwave dashboard → Settings → Webhooks → Test, or
+   curl -X POST http://localhost:5000/api/webhooks/flutterwave \
+     -H "verif-hash: $FLW_WEBHOOK_SECRET_HASH" \
+     -H "Content-Type: application/json" \
+     -d '{"event":"charge.completed","data":{"id":123456,"tx_ref":"AYF-...","flw_ref":"FLW...","amount":50000,"currency":"NGN","status":"successful","customer":{"email":"test@x.com"}}}'
    ```
-   Webhook verifies signature via `STRIPE_WEBHOOK_SECRET`, inserts `WebhookEvent` atomically, handles `payment_intent.succeeded|payment_failed|canceled`, increments farm `fundedAmount` atomically, marks farm `funded` if goal met, sends non-blocking email.
 
-4. If Stripe is not configured, investing returns `503 Payments unavailable`.
+4. **Fallback verify** after redirect: Flutterwave redirects to `FLW_REDIRECT_URL?transaction_id=xxx&tx_ref=yyy&status=successful`. Frontend should call:
+   ```bash
+   GET /api/investments/<investmentId>/verify?transaction_id=xxx&tx_ref=yyy
+   ```
+   Server verifies via API and marks completed (idempotent with webhook).
 
----
+   If Flutterwave not configured, investing returns `503`.
 
-## ROI Worker
+### Payout (ROI)
 
-- **When:** Daily at midnight + once 5s after server boot (if `ENABLE_ROI_WORKER != "false"`).
-- **What:** `processDueROIs()` queries `{status:completed, roiPaid:false, maturityDate:$lte:now}` → for each, requires `user.stripeAccountId`; creates `stripe.transfers.create({amount: projectedReturn*100, destination, idempotencyKey})` → sets `roiPaid:true`.
-- **Run standalone:**
+- **When:** Daily midnight + 5s after boot (`processDueROIs`).
+- **Query:** `{status:completed, roiPaid:false, maturityDate:$lte:now}`.
+- **Requires:** `user.flutterwaveAccountNumber` + `user.flutterwaveBankCode` (set via `PATCH /api/users/:id`). Without, `skipped` + warning.
+- **Call:** `POST /v3/transfers` with `account_bank`, `account_number`, `amount: projectedReturn()`, `currency: investment.currency || FLW_CURRENCY`, `reference: roi-${id}-${Date.now()}`, `beneficiary_name`, `meta`. On success sets `roiPaid:true`, `roiFlutterwaveTransferId`, `flutterwaveTransferId`.
+- **Standalone:**
   ```bash
   npm run worker:roi
+  # or
+  node dist/workers/processROI.js
   ```
-- **Manual trigger** (in code): `await processDueROIs()`
 
-> Add `stripeAccountId` to investors via `PATCH /api/users/:id {stripeAccountId:"acct_..."} ` (Connect Express/Custom).
+> Set bank details: `PATCH /api/users/<investorId> {flutterwaveAccountNumber:"0690000040", flutterwaveBankCode:"044", flutterwaveAccountName:"John Doe"}`
 
 ---
 
 ## Security Notes
 
-- Signup **cannot** become admin by passing `role`. See `src/modules/auth/auth.service.ts: signupUser` forces `investor`.
-- Passwords use `bcryptjs` with `genSalt(12)` + `select:false`; never returned in JSON (see `sanitizeUser`).
-- JWT: `15m` access, `7d` refresh (httpOnly cookie `secure` in prod, `sameSite:lax`), distinct errors for expired/invalid.
-- CORS: reflects `CLIENT_URL` + localhost in dev, not `origin:true` globally in prod.
-- Rate limiting: `100/15m` global, `20/15m` on `/api/auth`.
-- Sanitization: `sanitize` middleware strips `$`/`.` keys and `<script>` tags.
-- Validation: Zod schemas for signup/login/farm/invest; malformed `ObjectId` yields `400 CastError`, not 500.
-- Webhook: raw body, signature checked, idempotency via unique index.
+- Signup cannot become admin.
+- Passwords `bcrypt(12)` + `select:false`; `sanitizeUser`.
+- JWT `15m`/`7d` httpOnly `secure` in prod.
+- CORS allowlist `CLIENT_URL` + localhost in dev.
+- Rate limit `100/15m` global, `20/15m` auth.
+- `sanitize` strips `$`/` .` + `<script>`.
+- Zod validation; `CastError`→400.
+- Webhook: `verif-hash` + **API verification** + idempotency via unique `stripeEventId` (dedupId). Never trust redirect query alone.
 
-Set a strong `JWT_SECRET` and rotate `.env` if you ever committed the default `super_super_secret_key`.
+Set strong `JWT_SECRET` + `FLW_WEBHOOK_SECRET_HASH` (random 16+). Rotate if leaked.
 
 ---
 
@@ -232,11 +269,11 @@ Set a strong `JWT_SECRET` and rotate `.env` if you ever committed the default `s
 
 | Command | Description |
 |---------|-------------|
-| `npm run dev` | ts-node-dev with transpile-only & respawn |
-| `npm run build` | `tsc` to `dist/` |
+| `npm run dev` | ts-node-dev |
+| `npm run build` | `tsc` → `dist/` |
 | `npm start` | `node dist/server.js` |
-| `npm run worker:roi` | Run ROI worker standalone |
-| `npm run seed:admin` | Seed admin user |
+| `npm run worker:roi` | ROI standalone |
+| `npm run seed:admin` | Seed admin |
 | `npm run typecheck` | `tsc --noEmit` |
 
 ---
@@ -245,17 +282,17 @@ Set a strong `JWT_SECRET` and rotate `.env` if you ever committed the default `s
 
 ```
 src/
-  app.ts                     # Express setup (helmet, cors, raw webhook, morgan, limits, routes, 404)
+  app.ts                     # helmet, cors, webhooks (flutterwave json + stripe raw), morgan, limits, routes
   server.ts                  # connectDB + listen + startROIWorker + graceful shutdown
-  config/ { env.ts, db.ts, stripe.ts, cloudinary.ts }
+  config/ { env.ts, db.ts, flutterwave.ts, stripe.ts(shim), cloudinary.ts }
   middlewares/ { auth, role, error, validate, sanitize }
   modules/
     auth/ { controller, service, routes }
-    users/ { model, routes }    # admin user management
+    users/ { model, routes }
     farms/ { model, controller, routes }
-    investments/ { model, controller, routes }
-    payments/ { service, webhook, roi.service, webhookEvent.model }
-  utils/ { AppError, catchAsync, email, validation (zod), pagination }
+    investments/ { model, controller, routes }  # flutterwave tx_ref + verify endpoint
+    payments/ { service(flutterwave), webhook(flutterwave), roi.service, webhookEvent.model }
+  utils/ { AppError, catchAsync, email, validation, pagination }
   workers/ { processROI.ts }
   scripts/ { seedAdmin.ts }
   types/ { express.d.ts }
@@ -265,25 +302,25 @@ src/
 
 ## Troubleshooting
 
-**`Webhook Error: No signatures found`** → Ensure route is `express.raw` *before* `express.json()` (fixed) and `STRIPE_WEBHOOK_SECRET` matches `stripe listen` secret. Check header is `stripe-signature` (lowercase).
+**`Invalid webhook hash`** → Ensure dashboard Settings → Webhooks → Secret Hash == `FLW_WEBHOOK_SECRET_HASH` and header `verif-hash` matches exactly. In dev without hash set, verification is skipped (warn).
 
-**`MongoDB connection failed`** → Verify `MONGO_URI` (Atlas needs IP allowlist). Test with `mongosh "<uri>"`.
+**`Could not verify Flutterwave transaction`** → Check `FLW_SECRET_KEY` correct and network. Test via `curl https://api.flutterwave.com/v3/transactions/<id>/verify -H "Authorization: Bearer $FLW_SECRET_KEY"`.
 
-**`Email timeout`** → If `EMAIL_*` unconfigured, emails are mocked (log shows `[EMAIL MOCK]`). No failure blocks investing.
+**`Payments unavailable (Flutterwave not configured)`** → Set `FLW_SECRET_KEY` (test `FLWSECK_TEST-...` then live `FLWSECK-...`).
 
-**`Farm already fully funded`** → `POST /invest` checks `goal - fundedAmount`. Delete investments or increase `investmentGoal`.
+**`Investor has no payout bank details – skipping ROI`** → PATCH user with `flutterwaveAccountNumber`/`flutterwaveBankCode`.
 
-**Tests fail with `self-signed certificate`** → `NODE_TLS_REJECT_UNAUTHORIZED=0` for local (not prod).
+**`MongoDB connection failed`** → Check `MONGO_URI` + Atlas IP whitelist. Degraded mode still serves `/health` and validation, but DB ops timeout 10s.
 
 ---
 
-## Roadmap (see AUDIT.md for details)
+## Roadmap
 
-- Jest + mongodb-memory-server + Stripe mock tests
-- Swagger OpenAPI at `/api-docs`
+- Jest + mongodb-memory-server + Flutterwave mock tests
+- Swagger at `/api-docs`
 - BullMQ/Redis queue for email/ROI
 - Password reset & email verification
-- Cloudinary image upload endpoint
+- Cloudinary image upload
 - Dockerfile + CI
 
 ---

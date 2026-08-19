@@ -14,12 +14,12 @@
   "keywords": [
     "agro",
     "investment",
-    "stripe",
+    "flutterwave",
     "farms"
   ],
   "author": "",
   "license": "ISC",
-  "description": "AYF Agro Investment backend – Stripe-powered farm investment with ROI payouts",
+  "description": "AYF Agro Investment backend – Flutterwave-powered farm investment (Nigeria-first) with ROI payouts via Flutterwave Transfers",
   "dependencies": {
     "bcryptjs": "^3.0.3",
     "cloudinary": "^2.8.0",
@@ -34,7 +34,6 @@
     "morgan": "^1.11.0",
     "node-cron": "^4.2.1",
     "nodemailer": "^9.0.5",
-    "stripe": "^20.1.0",
     "zod": "^4.4.3"
   },
   "devDependencies": {

@@ -6,7 +6,8 @@ export const connectDB = async () => {
     // Mongoose 7+ no longer needs useNewUrlParser / useUnifiedTopology
     await mongoose.connect(ENV.MONGO_URI, {
       autoIndex: true,
-      // keepAlive is deprecated but still ok
+      serverSelectionTimeoutMS: 5000,
+      connectTimeoutMS: 5000,
     });
     console.log("✅ MongoDB connected");
   } catch (error) {

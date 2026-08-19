@@ -1,19 +1,24 @@
-import Stripe from "stripe";
+/**
+ * Legacy Stripe shim — kept for backward compatibility.
+ * New code should use src/config/flutterwave.ts (Flutterwave is primary).
+ * This file does NOT require the `stripe` package; it provides stubs so existing
+ * imports don't break if STRIPE keys are still present.
+ */
 import { ENV } from "./env";
 
-let stripeInstance: Stripe | null = null;
-
-export const getStripe = (): Stripe => {
+export const getStripe = (): any => {
   if (!ENV.STRIPE_SECRET_KEY) {
-    throw new Error("STRIPE_SECRET_KEY is not configured. Payment features are disabled.");
+    throw new Error("STRIPE_SECRET_KEY not configured – Stripe is deprecated. Use Flutterwave (FLW_SECRET_KEY).");
   }
-  if (!stripeInstance) {
-    stripeInstance = new Stripe(ENV.STRIPE_SECRET_KEY, {
-      // Use latest stable API version - omit apiVersion to use account default or pin explicitly
-      // apiVersion: "2024-06-20",
-    });
+  // If legacy code still tries to use Stripe at runtime and stripe package is not installed,
+  // we throw a clear message.
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const Stripe = require("stripe");
+    return new Stripe(ENV.STRIPE_SECRET_KEY);
+  } catch {
+    throw new Error("Stripe package not installed. Install `stripe` or migrate to Flutterwave.");
   }
-  return stripeInstance;
 };
 
 export const isStripeConfigured = () => Boolean(ENV.STRIPE_SECRET_KEY);

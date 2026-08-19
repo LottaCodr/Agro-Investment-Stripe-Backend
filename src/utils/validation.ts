@@ -38,7 +38,7 @@ export const farmUpdateSchema = farmCreateSchema.partial().strip();
 export const investSchema = z.object({
   farmId: z.string().min(1, "farmId required"),
   amount: z.number().positive("Amount must be positive").max(1_000_000),
-  currency: z.string().trim().min(3).max(3).optional().default("usd"),
+  currency: z.string().trim().min(3).max(3).optional().default("NGN"),
 });
 
 export const paginationSchema = z.object({
